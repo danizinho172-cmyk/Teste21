@@ -1,0 +1,239 @@
+name: Windows Cloud PC - AnyDesk
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Start Windows Cloud PC
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # ==========================================
+      # 1. Baixar AnyDesk
+      # ==========================================
+      - name: Download AnyDesk
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $url = "https://download.anydesk.com/AnyDesk.exe"
+          $installer = "$env:RUNNER_TEMP\AnyDesk.exe"
+
+          Write-Host "Baixando AnyDesk..."
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $installer `
+            -UseBasicParsing
+
+          if (-not (Test-Path $installer)) {
+              throw "Falha ao baixar o AnyDesk."
+          }
+
+          Write-Host "Download concluído."
+
+      # ==========================================
+      # 2. Instalar AnyDesk
+      # ==========================================
+      - name: Install AnyDesk
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $installer = "$env:RUNNER_TEMP\AnyDesk.exe"
+          $installDir = "C:\Program Files (x86)\AnyDesk"
+          $anydesk = "$installDir\AnyDesk.exe"
+
+          Write-Host "Instalando AnyDesk..."
+
+          $arguments = "--install `"$installDir`" --start-with-win --silent"
+
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList $arguments `
+            -Wait `
+            -PassThru
+
+          Write-Host "Código de saída: $($process.ExitCode)"
+
+          Start-Sleep -Seconds 15
+
+          if (-not (Test-Path $anydesk)) {
+              Write-Host "Procurando AnyDesk..."
+
+              $found = Get-ChildItem `
+                "C:\Program Files*" `
+                -Filter "AnyDesk.exe" `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+
+              if ($found) {
+                  $anydesk = $found.FullName
+                  Write-Host "AnyDesk encontrado em: $anydesk"
+              }
+              else {
+                  throw "AnyDesk.exe não foi encontrado após a instalação."
+              }
+          }
+
+          # Salvar o caminho para os próximos passos
+          "ANYDESK_PATH=$anydesk" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          Write-Host "AnyDesk instalado com sucesso."
+
+      # ==========================================
+      # 3. Iniciar serviço
+      # ==========================================
+      - name: Start AnyDesk
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $anydesk = $env:ANYDESK_PATH
+
+          Write-Host "Iniciando AnyDesk..."
+
+          & $anydesk --start
+
+          Start-Sleep -Seconds 15
+
+          $process = Get-Process `
+            -Name "AnyDesk" `
+            -ErrorAction SilentlyContinue
+
+          if ($process) {
+              Write-Host "AnyDesk está rodando."
+          }
+          else {
+              Write-Host "Processo AnyDesk não encontrado."
+              Write-Host "Tentando iniciar novamente..."
+
+              Start-Process `
+                -FilePath $anydesk `
+                -ArgumentList "--start"
+
+              Start-Sleep -Seconds 15
+
+              $process = Get-Process `
+                -Name "AnyDesk" `
+                -ErrorAction SilentlyContinue
+
+              if (-not $process) {
+                  throw "Não foi possível iniciar o AnyDesk."
+              }
+          }
+
+      # ==========================================
+      # 4. Configurar senha
+      # ==========================================
+      - name: Configure Unattended Access
+        shell: powershell
+        env:
+          ANYDESK_PASSWORD: ${{ secrets.ANYDESK_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $anydesk = $env:ANYDESK_PATH
+
+          if ([string]::IsNullOrWhiteSpace($env:ANYDESK_PASSWORD)) {
+              throw "O secret ANYDESK_PASSWORD não foi configurado."
+          }
+
+          Write-Host "Configurando acesso não supervisionado..."
+
+          # O AnyDesk espera a senha pelo stdin
+          $env:ANYDESK_PASSWORD |
+            & $anydesk --set-password
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Falha ao configurar a senha do AnyDesk. Código: $LASTEXITCODE"
+          }
+
+          Write-Host "Senha configurada com sucesso."
+
+      # ==========================================
+      # 5. Obter ID
+      # ==========================================
+      - name: Get AnyDesk ID
+        shell: powershell
+        run: |
+          $anydesk = $env:ANYDESK_PATH
+
+          Write-Host "Obtendo ID do AnyDesk..."
+
+          $id = & $anydesk --get-id 2>&1
+
+          Write-Host "================================"
+          Write-Host "AnyDesk ID:"
+          Write-Host $id
+          Write-Host "================================"
+
+      # ==========================================
+      # 6. Verificar status
+      # ==========================================
+      - name: Check AnyDesk
+        shell: powershell
+        run: |
+          $anydesk = $env:ANYDESK_PATH
+
+          Write-Host "Verificando AnyDesk..."
+
+          & $anydesk --get-status
+
+          Write-Host ""
+          Write-Host "Processos:"
+
+          Get-Process `
+            -Name "AnyDesk" `
+            -ErrorAction SilentlyContinue |
+            Select-Object Id, ProcessName, CPU
+
+      # ==========================================
+      # 7. Manter o runner ativo
+      # ==========================================
+      - name: Keep AnyDesk Running
+        shell: powershell
+        run: |
+          $anydesk = $env:ANYDESK_PATH
+
+          Write-Host "Monitoramento iniciado."
+
+          while ($true) {
+
+              $process = Get-Process `
+                -Name "AnyDesk" `
+                -ErrorAction SilentlyContinue
+
+              if (-not $process) {
+
+                  Write-Host "AnyDesk parou."
+                  Write-Host "Tentando reiniciar..."
+
+                  & $anydesk --start
+
+                  Start-Sleep -Seconds 15
+
+                  $process = Get-Process `
+                    -Name "AnyDesk" `
+                    -ErrorAction SilentlyContinue
+
+                  if ($process) {
+                      Write-Host "AnyDesk reiniciado."
+                  }
+                  else {
+                      Write-Host "Falha ao reiniciar AnyDesk."
+                  }
+
+              }
+              else {
+                  Write-Host "$(Get-Date) - AnyDesk funcionando."
+              }
+
+              Start-Sleep -Seconds 60
+          }
